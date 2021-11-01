@@ -1,0 +1,219 @@
+---
+title: "Initial Data Review"
+output: html_notebook
+---
+
+Initial Data Review for African Murid Dataset
+
+```{r}
+pacman::p_load(tidyverse, brms, tidybayes)
+scale2 <- function(x, na.rm = TRUE) (x - mean(x, na.rm = na.rm)) / sd(x, na.rm)
+```
+
+```{r}
+dat <- read_csv("data/murid_download_11Nov2021.csv") %>% 
+  mutate(taxon =  str_c(genus,"_", species)) %>% 
+  drop_na(taxon) %>% 
+  ## Remove some problematic HB observatios
+  filter(hb < 400 ) %>% filter(hb > 40 ) %>% 
+  select(-c("basis of record", subspecies, url)) %>% 
+  mutate_if(is.numeric, scale2, na.rm = TRUE)
+
+dat %>% distinct(taxon) %>% count()
+```
+131 species in the dataframe. Not bad!
+
+```{r}
+dat %>% group_by(taxon) %>% 
+  drop_na(hb) %>%
+  summarise(mean = mean(hb, na.rm = TRUE),
+            var = var(hb),
+            n = n()) %>% 
+  arrange(desc(n))
+
+dat %>% group_by(taxon) %>% 
+  drop_na(hb) %>%
+  summarise(n = as.numeric(n())) %>% 
+  ungroup() %>% 
+  mutate( median = median(n),
+          mean = mean(n))
+```
+Good list of variance. Does variance increase or decrease with number of species sampled?
+Plot log(n) because there is one taxa, Mastomys_natalensis, with 6269 samples. The next closest is 1459!
+```{r} 
+dat %>% group_by(taxon) %>% 
+  summarise(mean = mean(hb, na.rm = TRUE),
+            var = var(hb, na.rm = TRUE),
+            n = n()) %>%
+  ggplot(aes(y = var, x = log(n))) +
+  geom_point()
+```
+Plot, filtering the taxa with huge variance
+
+```{r}
+dat %>% group_by(taxon) %>% 
+  summarise(mean = mean(hb, na.rm = TRUE),
+            var = var(hb, na.rm = TRUE),
+            n = n()) %>%
+  filter(var <= 1.7,
+         n <= 1000) %>% 
+  ggplot(aes(y = var, x = n)) +
+  geom_point() +
+  ggtitle("Some heteroskedacity but not bad!") +
+  theme_bw()
+```
+Try removing taxa with fewer than 10 samples. This leaves 92 species. 
+```{r}
+dat %>% group_by(taxon) %>% 
+  drop_na(hb) %>%
+  summarise(n = n()) %>% 
+  filter(n >= 10) %>% 
+  nrow()
+```
+Here's that plot
+```{r}
+dat %>% group_by(taxon) %>% 
+  summarise(mean = mean(hb, na.rm = TRUE),
+            var = var(hb, na.rm = TRUE),
+            n = n()) %>%
+  filter(var <= 1.7,
+         n <= 1000,
+         n >= 20) %>% 
+  ggplot(aes(y = var, x = n)) +
+  geom_point() +
+  ggtitle("More than 10 samples") +
+  theme_bw()
+```
+
+Differences in variance between sexes?
+```{r}
+dat %>% drop_na(hb, sex) %>% 
+  group_by(sex, taxon) %>% 
+  summarise(mean = mean(hb, na.rm = TRUE),
+            var = var(hb, na.rm = TRUE),
+            n = n()) %>% 
+  filter(var <= 1.7,
+         n <= 1000,
+         n >= 20) %>% 
+  ggplot(aes(y = var, x = n, color = sex)) +
+  geom_point() +
+  ggtitle("Differences in variance between sexes") +
+  theme_bw()
+```
+
+Differences in bodysize variance between sexes? Try a model!
+estimating the differences in hb length and hb length sigma between males and females
+```{r}
+d <- dat %>% select(taxon, sex, hb) %>% 
+  drop_na(hb, sex)
+
+m1 <- brm(bf(hb ~ 0 + sex,
+             sigma ~ 0 + sex),
+          prior = c(prior(normal(0, 1), class = "b"),
+                    prior(normal(0, 1), class = "b", dpar = "sigma")),
+          d,
+          refresh = 0,
+          chains = 2, cores = getOption("mc.cores", 4))
+
+post <- posterior_samples(m1) %>% as_tibble() %>% 
+  mutate(dif_sex = b_sexf - b_sexm,
+         dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
+  select(-"lp__") %>%
+  pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
+
+post %>% filter(param == c("dif_sex", "dif_sig")) %>% 
+  ggplot(aes(x = val)) +
+  geom_vline(xintercept = 0, alpha = 1/5) +
+  #geom_density(color = "firebrick", fill = "firebrick", names = c("CHanging", "names?")) +
+  stat_halfeye(.width = .89, alpha = 0.8,  normalize = "panels") +
+  labs(x = "", y = "") +
+  theme_bw() +
+  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance"))) +
+  ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince (F - M")
+  
+```
+
+
+Intraspecific Variance Model
+
+practice
+```{r}
+mt1 <- brm(bf(hb ~ 0 + sex + (1|taxon)),
+          data = d,
+          #prior = c(prior(normal(0, 1), class = "b"),
+                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
+          #          prior(normal(0, 1), class = "sd")),
+          #refresh = 0,
+          inits = 0,
+          chains = 2,
+          cores = getOption("mc.cores", 4),
+          iter = 2000)
+
+mt2 <- brm(bf(hb ~ 0 + sex + (1|taxon/sex)),
+          data = d,
+          prior = c(prior(normal(0, 1), class = "b"),
+                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
+                    prior(normal(0, 1), class = "sd")),
+          #refresh = 0,
+          inits = 0,
+          chains = 2,
+          cores = getOption("mc.cores", 4),
+          iter = 2000)
+
+mt3 <- brm(bf(hb ~ 0 + sex + (1|taxon),
+              sigma ~ 0 + sex),
+          data = d,
+          prior = c(prior(normal(0, 1), class = "b"),
+                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
+                    prior(normal(0, 1), class = "sd")),
+          #refresh = 0,
+          inits = 0,
+          chains = 2,
+          cores = getOption("mc.cores", 4),
+          iter = 2000)
+
+mt4 <- brm(bf(hb ~ 0 + sex + (1|taxon),
+              sigma ~ 0 + sex + (1|taxon)),
+          data = d,
+          prior = c(prior(normal(0, 1), class = "b"),
+                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
+                    prior(normal(0, 1), class = "sd")),
+          #refresh = 0,
+          inits = 0,
+          chains = 2,
+          cores = getOption("mc.cores", 4),
+          iter = 2000)
+```
+
+```{r}
+d <- dat %>% select(taxon, sex, hb) %>% 
+  drop_na(hb, sex)
+
+m2 <- brm(bf(hb ~ 0 + sex + (1|taxon),
+             sigma ~ 0 + sex + (1|taxon)),
+          data = d,
+          prior = c(prior(normal(0, 1), class = "b"),
+                    prior(normal(0, 1), class = "b", dpar = "sigma"),
+                    prior(normal(0, 1), class = "sd")),
+          refresh = 0,
+          inits = 0,
+          chains = 2,
+          iter = 5000)
+
+post2 <- posterior_samples(m2) %>% as_tibble() %>% 
+  mutate(dif_sex = b_sexf - b_sexm,
+         dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
+  select(-"lp__") %>%
+  pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
+
+post2 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
+  ggplot(aes(x = val)) +
+  geom_vline(xintercept = 0, alpha = 1/5) +
+  #geom_density(color = "firebrick", fill = "firebrick", names = c("CHanging", "names?")) +
+  stat_halfeye(.width = .89, alpha = 0.8,  normalize = "panels") +
+  labs(x = "", y = "") +
+  theme_bw() +
+  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M", "dif_sig" = "Differences in Head-Body Length Variance"))) +
+  ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince (F - M")
+```
+
