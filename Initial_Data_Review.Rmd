@@ -13,6 +13,8 @@ This is left today (3 November 2021) with 2 model versions, one without intraspe
 
 TO-DO:
 -) Think about the phylogeny. Is this important? Use the Nations 2020 tree, even if it cuts the # of species by a lot. 
+-) Still lousy convergence on the sex means. Is this just due to the range of body sizes? The priors? Not sure. 
+-) In addition, why are the means for both males and females above zero??
 -) Next I want to attach the locomotor mode info to the traits (the tree will help this!), and start working with intraspecific variance between locomotor modes. I think that arboreal taxa may have a lower intraspecific variance than "terrestrial" taxa. Based on Nations 2020, general were tightly conserved too. This is a great extension to that study. 
 
  
@@ -128,16 +130,18 @@ m1 <- brm(bf(hb ~ 0 + sex,
           refresh = 0,
           chains = 2, cores = getOption("mc.cores", 4))
 
-post <- posterior_samples(m1) %>% as_tibble() %>% 
+post <- posterior_samples(m1) %>% as_tibble() %>%
+  select(starts_with("b_")) %>%
   mutate(dif_sex = b_sexf - b_sexm,
+         #put sigma values on the right scale
+         b_sigma_sexf = exp(b_sigma_sexf),
+         b_sigma_sexm = exp(b_sigma_sexm),
          dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
-  select(-"lp__") %>%
   pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
 
 post %>% filter(param == c("dif_sex", "dif_sig")) %>% 
   ggplot(aes(x = val)) +
   geom_vline(xintercept = 0, alpha = 1/5) +
-  #geom_density(color = "firebrick", fill = "firebrick", names = c("CHanging", "names?")) +
   stat_halfeye(.width = .89, alpha = 0.8,  normalize = "panels") +
   labs(x = "", y = "") +
   theme_bw() +
@@ -149,7 +153,7 @@ post %>% filter(param == c("dif_sex", "dif_sig")) %>%
 
 # Intraspecific Variance Model
 
-Havig some problems with the models converging. I think it has to do with the massive variance in the number of samples per species.
+Havig some problems with the models converging. I think it has to do with the massive variance in the number of samples per species. I would guess that 21K samples would lead to BETTER convergence but I guess not. 
 
 
 ```{r}
@@ -157,9 +161,9 @@ d <- dat %>% select(taxon, sex, hb) %>%
   drop_na(hb, sex)
 
 m2 <- brm(bf(hb ~ 0 + sex + (1|taxon),
-             sigma ~ 0 + sex + (1|taxon)),
+             sigma ~ 0 + sex),
           data = d,
-          prior = c(prior(normal(0, 1), class = "b"),
+          prior = c(prior(normal(-1, 1), class = "b"),
                     prior(normal(0, 1), class = "b", dpar = "sigma"),
                     prior(normal(0, 1), class = "sd")),
           refresh = 0,
@@ -171,24 +175,23 @@ m2 <- brm(bf(hb ~ 0 + sex + (1|taxon),
 post2 <- posterior_samples(m2) %>% as_tibble() %>% 
   select(starts_with("b_")) %>% 
   mutate(dif_sex = b_sexf - b_sexm,
+         #put sigma values on the right scale
+         b_sigma_sexf = exp(b_sigma_sexf),
+         b_sigma_sexm = exp(b_sigma_sexm),
+         #calculate difference
          dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
-  #select(-"lp__") %>%
   pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
 
 post2 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
   ggplot(aes(x = val)) +
   geom_vline(xintercept = 0, alpha = 1/5) +
-  #geom_density(color = "firebrick", fill = "firebrick", names = c("CHanging", "names?")) +
-  stat_halfeye(.width = .89, alpha = 0.8,  normalize = "panels") +
+  stat_halfeye(.width = .89, alpha = 0.8, normalize = "panels") +
   labs(x = "", y = "") +
   theme_bw() +
   facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance"))) +
   ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince (F - M")
 ```
-#### Poor Convergence
-```{r}
-plot(m2, N=3, ask=F)
-```
+#### poor convergence
 
 # Limit the number of samples per taxon
 
@@ -224,6 +227,7 @@ m2.1
 
 #### Estimate Sigma
 This particular model works well. A different sigma for each sex rather than a different sigma for each sex for each species.
+
 ```{r}
 m2.2 <- brm(bf(hb ~ 0 + sex + (0 + sex|taxon),
                sigma ~ 0 + sex ),
