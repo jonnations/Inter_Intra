@@ -1,10 +1,23 @@
 ---
-title: "Initial Data Review"
+title: "Initial Data Review & Dimorphism"
 output: html_notebook
 ---
 
 Initial Data Review for African Murid Dataset
 
+# Sexual Dimorphism and Intraspecific variation
+
+Today I tried to look at differences in body-length between males and females while including taxon as a group-level effect. For some reason the grouping variable messes everything up. Probably due to the sheer number of some of the taxa in the set?
+
+This is left today (3 November 2021) with 2 model versions, one without intraspecific variation, and one with. Interesting they give different answers! Without intra-variation, females are larger. With, males are larger. 
+
+TO-DO:
+-) Think about the phylogeny. Is this important? Use the Nations 2020 tree, even if it cuts the # of species by a lot. 
+-) Next I want to attach the locomotor mode info to the traits (the tree will help this!), and start working with intraspecific variance between locomotor modes. I think that arboreal taxa may have a lower intraspecific variance than "terrestrial" taxa. Based on Nations 2020, general were tightly conserved too. This is a great extension to that study. 
+
+ 
+#### Data Processing
+This is pretty easy given the clean state of the data
 ```{r}
 pacman::p_load(tidyverse, brms, tidybayes)
 scale2 <- function(x, na.rm = TRUE) (x - mean(x, na.rm = na.rm)) / sd(x, na.rm)
@@ -134,56 +147,10 @@ post %>% filter(param == c("dif_sex", "dif_sig")) %>%
 ```
 
 
-Intraspecific Variance Model
+# Intraspecific Variance Model
 
-practice
-```{r}
-mt1 <- brm(bf(hb ~ 0 + sex + (1|taxon)),
-          data = d,
-          #prior = c(prior(normal(0, 1), class = "b"),
-                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
-          #          prior(normal(0, 1), class = "sd")),
-          #refresh = 0,
-          inits = 0,
-          chains = 2,
-          cores = getOption("mc.cores", 4),
-          iter = 2000)
+Havig some problems with the models converging. I think it has to do with the massive variance in the number of samples per species.
 
-mt2 <- brm(bf(hb ~ 0 + sex + (1|taxon/sex)),
-          data = d,
-          prior = c(prior(normal(0, 1), class = "b"),
-                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
-                    prior(normal(0, 1), class = "sd")),
-          #refresh = 0,
-          inits = 0,
-          chains = 2,
-          cores = getOption("mc.cores", 4),
-          iter = 2000)
-
-mt3 <- brm(bf(hb ~ 0 + sex + (1|taxon),
-              sigma ~ 0 + sex),
-          data = d,
-          prior = c(prior(normal(0, 1), class = "b"),
-                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
-                    prior(normal(0, 1), class = "sd")),
-          #refresh = 0,
-          inits = 0,
-          chains = 2,
-          cores = getOption("mc.cores", 4),
-          iter = 2000)
-
-mt4 <- brm(bf(hb ~ 0 + sex + (1|taxon),
-              sigma ~ 0 + sex + (1|taxon)),
-          data = d,
-          prior = c(prior(normal(0, 1), class = "b"),
-                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
-                    prior(normal(0, 1), class = "sd")),
-          #refresh = 0,
-          inits = 0,
-          chains = 2,
-          cores = getOption("mc.cores", 4),
-          iter = 2000)
-```
 
 ```{r}
 d <- dat %>% select(taxon, sex, hb) %>% 
@@ -197,13 +164,15 @@ m2 <- brm(bf(hb ~ 0 + sex + (1|taxon),
                     prior(normal(0, 1), class = "sd")),
           refresh = 0,
           inits = 0,
+          cores = getOption("mc.cores", 4),
           chains = 2,
           iter = 5000)
 
 post2 <- posterior_samples(m2) %>% as_tibble() %>% 
+  select(starts_with("b_")) %>% 
   mutate(dif_sex = b_sexf - b_sexm,
          dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
-  select(-"lp__") %>%
+  #select(-"lp__") %>%
   pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
 
 post2 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
@@ -213,7 +182,80 @@ post2 %>% filter(param == c("dif_sex", "dif_sig")) %>%
   stat_halfeye(.width = .89, alpha = 0.8,  normalize = "panels") +
   labs(x = "", y = "") +
   theme_bw() +
-  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M", "dif_sig" = "Differences in Head-Body Length Variance"))) +
+  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance"))) +
   ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince (F - M")
 ```
+#### Poor Convergence
+```{r}
+plot(m2, N=3, ask=F)
+```
 
+# Limit the number of samples per taxon
+
+This leaves `n` samples per species (with higher counts than n). The others are left alone.
+At `n=50` the convergence greatly improves. 
+```{r}
+n <- 50
+
+d %>% group_by(taxon) %>% sample_n(if(n() < n) n() else n) -> d2
+
+```
+
+
+THe Trick here is modeling `~ 0 + sex + (0 + sex|taxon)` This estimates a different mean for each sex for each taxon rather than simply a different taxon mean. 
+
+
+#### No Sigma Estimation Model
+This works ok. 
+```{r}
+m2.1 <- brm(bf(hb ~ 0 + sex + (1|taxon)),
+          data = d2,
+          prior = c(prior(normal(0, 1), class = "b"),
+                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
+                    prior(normal(0, 1), class = "sd")),
+          refresh = 0,
+          inits = 0,
+          cores = getOption("mc.cores", 4),
+          chains = 2,
+          iter = 5000)
+
+m2.1
+```
+
+#### Estimate Sigma
+This particular model works well. A different sigma for each sex rather than a different sigma for each sex for each species.
+```{r}
+m2.2 <- brm(bf(hb ~ 0 + sex + (0 + sex|taxon),
+               sigma ~ 0 + sex ),
+          data = d2,
+          prior = c(prior(normal(0, 1), class = "b"),
+                    prior(normal(0, 1), class = "b", dpar = "sigma"),
+                    prior(normal(0, 1), class = "sd")),
+          refresh = 0,
+          inits = 0,
+          cores = getOption("mc.cores", 4),
+          chains = 2,
+          iter = 5000)
+
+m2.2
+
+post2.2 <- posterior_samples(m2.2) %>% as_tibble() %>% 
+  select(starts_with("b_")) %>% 
+  mutate(dif_sex = b_sexf - b_sexm,
+         b_sigma_sexf = exp(b_sigma_sexf),
+         b_sigma_sexm = exp(b_sigma_sexm),
+         dif_sig = b_sigma_sexf - b_sigma_sexm
+         ) %>% 
+  #select(-"lp__") %>%
+  pivot_longer(everything(), names_to = "param", values_to = "val")
+
+post2.2 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
+  ggplot(aes(x = val)) +
+  geom_vline(xintercept = 0, alpha = 1/5) +
+  #geom_density(color = "firebrick", fill = "firebrick", names = c("CHanging", "names?")) +
+  stat_halfeye(.width = .89, alpha = 0.8,  normalize = "panels") +
+  labs(x = "", y = "") +
+  theme_bw() +
+  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance (F - M)"))) +
+  ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince\nMales are larger and varinace is higher in males")
+```
