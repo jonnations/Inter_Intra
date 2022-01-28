@@ -44,14 +44,16 @@ spec <- read_csv("data/AfricanMammalDB_SPECIES_JAN_15Dec2021.csv", col_types = c
             accuracy,
             tissues,
             collector,
-            altitude_max))
+            altitude_max)) %>% 
+  unite("taxon", genus:species, sep = "_", remove = FALSE)
 
 measur <- read_csv("data/AfricanMammalDB_MEASUREMENTS_JAN_15Dec2021.csv", col_types = cols()) %>% 
   clean_names() %>% 
-  select(!c(subspecies, url))
+  select(!c(subspecies, url)) %>% 
+  unite("taxon", genus:species, sep = "_", remove = FALSE)
 
 loc <- read_csv("data/Loc_Modes.csv") %>% 
-  separate(taxon, c('genus', 'species'), sep="_") %>% 
+  separate(taxon, c('genus', 'species'), sep="_", remove = F) %>% 
   rename(loc_state = state_name,
          loc_state_numeric = state)
 ```
@@ -95,7 +97,7 @@ rm(spec, measur)
 #### Save File 
 ```{r}
 
-dat %>% write_csv("data/AfricanMammalDB_CLEANED_10Jan2022.csv")
+dat %>% write_csv("data/AfricanMammalDB_CLEANED_28Jan2022.csv")
 
 ```
 Some simple summaries to see what we have. I think we want to have at least 20(?) per species to test for intraspecific variation?
