@@ -15,7 +15,8 @@ Current Goals here are:
 # Data Wrangle
 #### Load Packages
 ```{r}
-pacman::p_load(tidyverse, brms, tidybayes, janitor, kableExtra)
+pacman::p_load(tidyverse, brms, tidybayes, janitor, kableExtra, cmdstanr)
+options(brms.backend = "cmdstanr")
 scale2 <- function(x, na.rm = TRUE) (x - mean(x, na.rm = na.rm)) / sd(x, na.rm)
 ```
 
@@ -23,6 +24,7 @@ scale2 <- function(x, na.rm = TRUE) (x - mean(x, na.rm = na.rm)) / sd(x, na.rm)
 There are two downloaded spreadsheets. The first is the **species** spreadsheet. This includes taxon id, catalog #, nomenclatural info, coordinates, sex, sexual condition, tissue info, etc. The second is the **measurements** spreadsheet. This contains catalog #, taxon, external measurements, sex, and the 25 cranial measurements. 
 
 We need a final spreadsheet that contains both of these combined, and filtered to only include specimens with some measurement data. This means the **measurements** spreadsheet can determine which of the speciomens in the **species** spreadsheet we want to keep. There are some extraneous columns I will filter out when loading.
+I am also adding a spreadsheet of locomotor modes. These are 4 categories - Arboreal, General, Terrestrial, and Amphibious - taken from Nations et al 2020. They are only for the Murine rodents in the data
 ```{r message=FALSE}
 #show_col_types = FALSE
 spec <- read_csv("data/AfricanMammalDB_SPECIES_JAN_15Dec2021.csv", col_types = cols()) %>% 
@@ -36,14 +38,25 @@ spec <- read_csv("data/AfricanMammalDB_SPECIES_JAN_15Dec2021.csv", col_types = c
             determination_year,
             date_collected_end,
             available,
-            url))
+            url,
+            trap,
+            type,
+            accuracy,
+            tissues,
+            collector,
+            altitude_max))
 
 measur <- read_csv("data/AfricanMammalDB_MEASUREMENTS_JAN_15Dec2021.csv", col_types = cols()) %>% 
   clean_names() %>% 
   select(!c(subspecies, url))
+
+loc <- read_csv("data/Loc_Modes.csv") %>% 
+  separate(taxon, c('genus', 'species'), sep="_") %>% 
+  rename(loc_state = state_name,
+         loc_state_numeric = state)
 ```
 
-#### Combine Data Frames
+#### Combine Data Frames and change to Darwin Traits
 We want to combine the two data frames and drop species with no measurements at all. The challenge is that we have two possible matching columns. We first want to match with catalog_number, and then try to match using collector_number. The easiest way to do this is create a new column combining collector number and catalog number, then combine on that, then drop it. 
 
 We also need to remove all non-museum (called "preserved") specimens, and remove specimens that have NA for all measurements. 
@@ -62,9 +75,28 @@ dat <- measur %>%
   # Remove unknown species, and species with "n.sp1" etc
   filter(!is.na(species),
          !is.na(genus),
-         !species %in% c("n.sp.1", "n.sp.2"))
+         !species %in% c("n.sp.1", "n.sp.2")) %>% 
+  #Darwin Core Stuff
+  add_column(continent = "Africa") %>% 
+  rename(massing = weight,
+         decimalLatitude = latitude,
+         decimalLongitude = longitude,
+         headbodylength = hb,
+         taillength = tl,
+         hindfootlength = hf,
+         earlength = el,
+         elevation = altitude) %>% 
+  # add locomotor mode
+  left_join(loc)
 
 rm(spec, measur)
+```
+
+#### Save File 
+```{r}
+
+dat %>% write_csv("data/AfricanMammalDB_CLEANED_10Jan2022.csv")
+
 ```
 Some simple summaries to see what we have. I think we want to have at least 20(?) per species to test for intraspecific variation?
 ```{r}
@@ -74,52 +106,46 @@ t1 %>% kbl() %>% kable_paper()
 
 dat %>% count(genus) 
 dat %>% count(family)
+dat %>% filter(family == "Muridae") %>% count(species)
 ```
 At the n=20 threshold, we have 122 species from 78 genera and 17 families
-
-```{r}
-dat %>% filter(species == "zena") %>% select(hf) %>% arrange(hf)
-```
-
-
-
-Today I tried to look at differences in body-length between males and females while including taxon as a group-level effect. For some reason the grouping variable messes everything up. Probably due to the sheer number of some of the taxa in the set?
-
-This is left today (3 November 2021) with 2 model versions, one without intraspecific variation, and one with. Interesting they give different answers! Without intra-variation, females are larger. With, males are larger. 
-
-TO-DO:
--) Think about the phylogeny. Is this important? Use the Nations 2020 tree, even if it cuts the # of species by a lot. 
--) Still lousy convergence on the sex means. Is this just due to the range of body sizes? The priors? Not sure. 
--) In addition, why are the means for both males and females above zero??
--) Next I want to attach the locomotor mode info to the traits (the tree will help this!), and start working with intraspecific variance between locomotor modes. I think that arboreal taxa may have a lower intraspecific variance than "terrestrial" taxa. Based on Nations 2020, general were tightly conserved too. This is a great extension to that study. 
-
+Also looks like around 26k data points that have locomotor modes.
 
 
 Explore the variance within each species and plot
 ```{r} 
 t1 <- dat %>%  
-  #df1 = df %>%
-  #group_by(genus, species) %>%
-  #filter(!(abs(hb - median(hb)) >5*sd(hb) )) %>% 
-  #ungroup() %>% 
-  mutate(shb = scale2(log(hb))) #%>% 
+  mutate(s_lnHB = scale2(log(hb)),
+         sHB = scale2(hb)) %>% 
   group_by(genus, species) %>%
-  summarise(mean = mean(hb, na.rm = TRUE),
-            var = var(hb, na.rm = TRUE),
+  summarise(mean_lnHB = mean(s_lnHB, na.rm = TRUE),
+            var_lnHB = var(s_lnHB, na.rm = TRUE),
+            mean_HB = mean(sHB, na.rm = TRUE),
+            var_HB = var(sHB, na.rm = TRUE),
             n = n()) %>% 
   filter(n >= 20,
-         !is.na(mean)) %>% 
-  arrange(var) 
+         !is.na(mean_HB)) %>% 
+  arrange(var_lnHB) 
+  
 t1   %>% kbl() %>% kable_paper()
 
-t1 %>% ggplot(aes(x = mean, y = var)) + geom_point()
+t1 %>% ggplot(aes(x = mean_lnHB, y = var_lnHB)) + geom_point()
 
 t1 %>% group_by(genus, species) %>% summarise(n = n())
 ```
-This is weird because the variance is strongly correlated with the mean. So.... we need to think about how we are scaling the variables, and how we are comparing the variances. Perhaps each family should be scaled together. 
+This is weird because the variance is strongly correlated with the mean. So.... we need to think about how we are scaling the variables, and how we are comparing the variances. Perhaps each family should be scaled together?
+
+Take a look at the plot with species with var_lnHB > 1 removed
+```{r}
+t1 %>% filter(var_lnHB <= 1) %>% ggplot(aes(x = mean_lnHB, y = var_lnHB)) + geom_point() + geom_smooth(method = lm)
+
+t1 %>% filter(var_lnHB <= 1) %>% ggplot(aes(x = mean_HB, y = var_HB)) + geom_point() + geom_smooth(method = lm)
+```
+Still more variance with higher mean values
+
 
 ```{r}
-dat %>% group_by(species) %>% 
+dat %>% group_by(genus, species) %>% 
   summarise(mean = mean(hb, na.rm = TRUE),
             var = var(hb, na.rm = TRUE),
             n = n()) %>%
@@ -132,396 +158,49 @@ dat %>% group_by(species) %>%
 ```
 # Problems
 
-Here is a lit of problems with the dataset as I run across them: 
+Here is a list of problems with the dataset as I run across them: 
 
 1. HB Below 10 is pretty much impossible. Really that should extend up to 20 or 30. 
 2. HF above 100 is crazy except for a few things like the Hystricomorpha. 
 3. Lophuromys zena HF values are all wrong, all are in the 200-270 range. Looks like there is just a missing decimal, so 240 should be 24.0. 
-4. there are lots of cropped tails, though it will be hard to know which are which. 
+4. There are clearly lots of cropped tails (Dendromus tail = 2??), though it will be hard to know which are cropped, because it's hard to know the range for each species.
 
-
-
-
-Differences in variance between sexes?
+Basic modeling play
+Only 67 of the species have loco info, so maybe this isn't the best. 
+These will take a long time, so I want to try some simple stuff to make sure it's working. Running without the grouping variable is fast. Adding grouping makes it much slower.
 ```{r}
-dat %>% drop_na(hb, sex) %>% 
-  group_by(sex, taxon) %>% 
-  summarise(mean = mean(hb, na.rm = TRUE),
-            var = var(hb, na.rm = TRUE),
-            n = n()) %>% 
-  filter(var <= 1.7,
-         n <= 1000,
-         n >= 20) %>% 
-  ggplot(aes(y = var, x = n, color = sex)) +
-  geom_point() +
-  ggtitle("Differences in variance between sexes") +
-  theme_bw()
+dat <- unite(taxon, c(genus, species), sep = "_")
+
+m1 <-  brm(bf(headbodylength ~ 0 + loc_state + (1|taxon),
+           sigma ~ 0 + loc_state),
+          family = student(),
+          data = dat,
+         # prior = c(prior(student_t(3, 0, 2.5), class = "b"),
+                    #prior(normal(0,1), class = "b", dpar = "sigma"),
+                    #prior(student_t(3, 0, 2.5), class = "sd")),
+          #refresh = 0,
+           chains = 4, 
+           cores = 4,
+          iter = 500)
 ```
 
-Differences in bodysize variance between sexes? Try a model!
-estimating the differences in hb length and hb length sigma between males and females
 ```{r}
-d <- dat %>% select(taxon, sex, hb) %>% 
-  drop_na(hb, sex) %>% 
-  group_by(taxon) %>% 
-  filter(n()>20) %>% 
-  filter(n()<1000)
-
-
-m1 <- brm(bf(hb ~ 0 + sex,
-             sigma ~ 0 + sex),
-          prior = c(prior(normal(0, 1), class = "b"),
-                    prior(normal(0, 1), class = "b", dpar = "sigma")),
-          d,
-          refresh = 0,
-          chains = 2, cores = getOption("mc.cores", 4))
-
-post <- posterior_samples(m1) %>% as_tibble() %>%
-  select(starts_with("b_")) %>%
-  mutate(dif_sex = b_sexf - b_sexm,
-         #put sigma values on the right scale
-         b_sigma_sexf = exp(b_sigma_sexf),
-         b_sigma_sexm = exp(b_sigma_sexm),
-         dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
-  pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
-
-post %>% filter(param == c("dif_sex", "dif_sig")) %>% 
-  ggplot(aes(x = val)) +
-  geom_vline(xintercept = 0, alpha = 1/5) +
-  stat_halfeye(.width = .89, alpha = 0.8,  normalize = "panels") +
-  labs(x = "", y = "") +
-  theme_bw() +
-  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance"))) +
-  ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince (F - M")
-  
+m1
+```
+```{r}
+plot(m1, ask=F, N=3)
 ```
 
 
-# Intraspecific Variance Model
 
-Havig some problems with the models converging. I think it has to do with the massive variance in the number of samples per species. I would guess that 21K samples would lead to BETTER convergence but I guess not. 
-
-Trying with student-t family and prior on sd. Robust regression is probably better for this type of analysis anyways!
-```{r}
-m2 <- brm(bf(hb ~ 0 + sex + (1|taxon),
-             sigma ~ 0 + sex),
-          family = skew_normal(),
-          data = d,
+m1 <-  brm(bf(headbodylength ~ 0 + loc_state + (1|species),
+             sigma ~ 0 + loc_state),
+          family = student(),
+          data = dat,
           prior = c(prior(student_t(3, 0, 2.5), class = "b"),
                     prior(normal(0,1), class = "b", dpar = "sigma"),
                     prior(student_t(3, 0, 2.5), class = "sd")),
           refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
+           chains = 4, 
+           cores = 4,
           iter = 5000)
-
-post2 <- posterior_samples(m2) %>% as_tibble() %>% 
-  select(starts_with("b_")) %>% 
-  mutate(dif_sex = b_sexf - b_sexm,
-         #put sigma values on the right scale
-         b_sigma_sexf = exp(b_sigma_sexf),
-         b_sigma_sexm = exp(b_sigma_sexm),
-         #calculate difference
-         dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
-  pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
-
-post2 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
-  ggplot(aes(x = val)) +
-  geom_vline(xintercept = 0, alpha = 1/5) +
-  stat_halfeye(.width = .89, alpha = 0.8, normalize = "panels") +
-  labs(x = "", y = "") +
-  theme_bw() +
-  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance"))) +
-  ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince (F - M")
-```
-#### poor convergence
-Too much variance on some of the taxa?
-```{r}
-d %>% group_by(taxon) %>% 
-  summarise(var = var(hb)) %>% 
-  arrange(desc(var))
-```
-Ok! The Mylomys dybowski and Dasymys incomtus have insanely large variance. Drop these and try again
-
-I am also going to drop a few extreme hb values that seem like mistakes
-
-```{r}
-'%!in%' <- function(x,y)!('%in%'(x,y))
-bad <- c("Mylomys_dybowskii", "Dasymys_incomtus")
-d <- dat %>% select(taxon, sex, hb) %>% 
-  drop_na(hb, sex) %>% 
-  group_by(taxon) %>% 
-  filter(n()>20) %>% 
-  filter(n()<1000) %>% 
-  filter(taxon %!in% bad) %>% 
-  filter(hb < 4)
-```
-
-```{r}
-m2.1 <- brm(bf(hb ~ 0 + sex + (1|taxon),
-             sigma ~ 0 + sex),
-          family = skew_normal(),
-          data = d,
-          prior = c(prior(student_t(3, 0, 2.5), class = "b"),
-                    prior(normal(0,1), class = "b", dpar = "sigma"),
-                    prior(student_t(3, 0, 2.5), class = "sd")),
-          refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
-          iter = 5000)
-
-```
-#### Nested?
-This is for a nested random effect, or a different estimate of sex values per taxon. 
-```{r}
-m2.2 <- brm(bf(hb ~ 0 + sex + (1|sex/taxon)
-             #sigma ~ 0 + sex
-             ),
-          family = student(),
-          data = d,
-          prior = c(prior(normal(0,1), class = "b"),
-                    prior(normal(0,1), class = "sigma"),
-                    prior(normal(0,1), class = "sd")),
-          refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
-          iter = 2500)
-plot(m2.2, N=3, ask=F)
-```
-
-
-```{r}
-m2.3 <- brm(bf(hb ~ 0 + sex + (1|gr(taxon, by = sex))
-             #sigma ~ 0 + sex
-             ),
-          family = student(),
-          data = d,
-          prior = c(prior(normal(0,1), class = "b"),
-                    prior(normal(0,1), class = "sigma"),
-                    prior(normal(0,1), class = "sd")),
-          refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
-          iter = 2500)
-plot(m2.3, N=3, ask=F)
-```
-
-
-
-```{r}
-post2 <- posterior_samples(m2.2) %>% as_tibble() %>% 
-  select(starts_with("b_")) %>% 
-  mutate(dif_sex = b_sexf - b_sexm#,
-         #put sigma values on the right scale
-         #b_sigma_sexf = exp(b_sigma_sexf),
-         #b_sigma_sexm = exp(b_sigma_sexm),
-         #calculate difference
-         #dif_sig = b_sigma_sexf - b_sigma_sexm
-         ) %>% 
-  pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
-
-post2 %>% filter(param == c("dif_sex")) %>% 
-  ggplot(aes(x = val)) +
-  geom_vline(xintercept = 0, alpha = 1/5) +
-  stat_halfeye(.width = .89, alpha = 0.8, normalize = "panels") +
-  labs(x = "", y = "") +
-  theme_bw() +
-  #facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance"))) +
-  ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince (F - M")
-```
-
-
-```{r}
-m3 <- brm(bf(hb ~ 0 + sex + (0 + sex|taxon),
-               sigma ~ 0 + sex ),
-          data = d,
-          family = student(),
-          prior = c(prior(normal(0, 1), class = "b"),
-                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
-                    prior(normal(0, 1), class = "sd")),
-          refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
-          iter = 5000)
-
-m3
-```
-
-```{r}
-post3 <- posterior_samples(m3) %>% as_tibble() %>% 
-  select(starts_with("b_")) %>% 
-  mutate(dif_sex = b_sexf - b_sexm,
-         #put sigma values on the right scale
-         b_sigma_sexf = exp(b_sigma_sexf),
-         b_sigma_sexm = exp(b_sigma_sexm),
-         #calculate difference
-         dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
-  pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
-
-post3 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
-  ggplot(aes(x = val)) +
-  geom_vline(xintercept = 0, alpha = 1/5) +
-  stat_halfeye(.width = .89, alpha = 0.8, normalize = "panels") +
-  labs(x = "", y = "") +
-  theme_bw() +
-  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance (F - M)"))) +
-  ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince (F - M)")
-```
-
-# Limit the number of samples per taxon
-
-This leaves `n` samples per species (with higher counts than n). The others are left alone.
-At `n=50` the convergence greatly improves. 
-```{r}
-n <- 200
-
-d %>% group_by(taxon) %>% sample_n(if(n() < n) n() else n) -> d2
-
-```
-
-```{r}
-m4 <- brm(bf(hb ~ 0 + sex + (0 + sex|taxon),
-               sigma ~ 0 + sex ),
-          data = d2,
-          family = student(),
-          prior = c(prior(normal(0, 1), class = "b"),
-                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
-                    prior(normal(0, 1), class = "sd")),
-          refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
-          iter = 5000)
-
-m4
-```
-```{r}
-post4 <- posterior_samples(m4) %>% as_tibble() %>% 
-  select(starts_with("b_")) %>% 
-  mutate(dif_sex = b_sexf - b_sexm,
-         #put sigma values on the right scale
-         b_sigma_sexf = exp(b_sigma_sexf),
-         b_sigma_sexm = exp(b_sigma_sexm),
-         #calculate difference
-         dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
-  pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
-
-post4 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
-  ggplot(aes(x = val)) +
-  geom_vline(xintercept = 0, alpha = 1/5) +
-  stat_halfeye(.width = .89, alpha = 0.8, normalize = "panels") +
-  labs(x = "", y = "") +
-  theme_bw() +
-  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance (F - M)"))) +
-  ggtitle("Differences in Body Size and Varaince (F - M)\n200 samples per species")
-```
-
-# Species Means
-run the same test but with a mean for each sex for each species
-```{r}
-d_mean <- d %>% 
-  group_by(sex, taxon) %>% 
-  summarise(mean_hb = mean(hb, na.rm = TRUE)) %>% 
-  ungroup()
-```
-
-```{r}
-m5 <- brm(bf(mean_hb ~ 0 + sex ,
-               sigma ~ 0 + sex ),
-          data = d_mean,
-          family = student(),
-          prior = c(prior(normal(0, 1), class = "b"),
-                    prior(normal(0, 1), class = "b", dpar = "sigma")),
-          refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
-          iter = 5000)
-```
-
-```{r}
-post5 <- posterior_samples(m5) %>% as_tibble() %>% 
-  select(starts_with("b_")) %>% 
-  mutate(dif_sex = b_sexf - b_sexm,
-         #put sigma values on the right scale
-         b_sigma_sexf = exp(b_sigma_sexf),
-         b_sigma_sexm = exp(b_sigma_sexm),
-         #calculate difference
-         dif_sig = b_sigma_sexf - b_sigma_sexm) %>% 
-  pivot_longer(cols = (1:6), names_to = "param", values_to = "val")
-
-post5 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
-  ggplot(aes(x = val)) +
-  geom_vline(xintercept = 0, alpha = 1/5) +
-  stat_halfeye(.width = .89, alpha = 0.8, normalize = "panels") +
-  labs(x = "", y = "") +
-  theme_bw() +
-  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance (F - M)"))) +
-  ggtitle("Differences in Body Size and Varaince (F - M)\nSpecies Means")
-```
-
-
-THe Trick here is modeling `~ 0 + sex + (0 + sex|taxon)` This estimates a different mean for each sex for each taxon rather than simply a different taxon mean. 
-
-
-#### No Sigma Estimation Model
-This works ok. 
-```{r}
-m2.1 <- brm(bf(hb ~ 0 + sex + (1|taxon)),
-          data = d2,
-          family = student(),
-          prior = c(prior(normal(0, 1), class = "b"),
-                    #prior(normal(0, 1), class = "b", dpar = "sigma"),
-                    prior(normal(0, 1), class = "sd")),
-          refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
-          iter = 5000)
-
-m2.1
-```
-
-#### Estimate Sigma
-This particular model works well. A different sigma for each sex rather than a different sigma for each sex for each species.
-
-```{r}
-m2.2 <- brm(bf(hb ~ 0 + sex + (0 + sex|taxon),
-               sigma ~ 0 + sex ),
-          data = d2,
-          prior = c(prior(normal(0, 1), class = "b"),
-                    prior(normal(0, 1), class = "b", dpar = "sigma"),
-                    prior(normal(0, 1), class = "sd")),
-          refresh = 0,
-          inits = 0,
-          cores = getOption("mc.cores", 4),
-          chains = 2,
-          iter = 5000)
-
-m2.2
-
-post2.2 <- posterior_samples(m2.2) %>% as_tibble() %>% 
-  select(starts_with("b_")) %>% 
-  mutate(dif_sex = b_sexf - b_sexm,
-         b_sigma_sexf = exp(b_sigma_sexf),
-         b_sigma_sexm = exp(b_sigma_sexm),
-         dif_sig = b_sigma_sexf - b_sigma_sexm
-         ) %>% 
-  #select(-"lp__") %>%
-  pivot_longer(everything(), names_to = "param", values_to = "val")
-
-post2.2 %>% filter(param == c("dif_sex", "dif_sig")) %>% 
-  ggplot(aes(x = val)) +
-  geom_vline(xintercept = 0, alpha = 1/5) +
-  #geom_density(color = "firebrick", fill = "firebrick", names = c("CHanging", "names?")) +
-  stat_halfeye(.width = .89, alpha = 0.8,  normalize = "panels") +
-  labs(x = "", y = "") +
-  theme_bw() +
-  facet_wrap(~ param, ncol = 1, labeller = as_labeller(c("dif_sex" = "Differences in Head-Body Length (F - M)", "dif_sig" = "Differences in Head-Body Length Variance (F - M)"))) +
-  ggtitle("Differences (Female - Male) in Body Size and Body Size Varaince\nMales are larger and varinace is higher in males")
-```
